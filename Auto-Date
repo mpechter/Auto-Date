@@ -1,0 +1,323 @@
+/******************************************************************************************
+ * Name: Gantt Auto-Date
+ * Author: Mike Pechter
+ * Date: 3/11/2021
+ * 
+ * Suggested use: Use this script to automatically complete a table of tasks, in conjunction with a Gantt View. 
+ * 
+ */
+
+//PART 1: Script Settings
+
+const config = input.config({
+    title: 'Gantt Auto-Date',
+    description: 'A script that lets you automatically add start and end dates to a table of tasks. Use in conjuntion with a Gantt View.\n \nPlease select the table and fields that correspond with the following:',
+    items: [
+        input.config.table('table', {
+            label: 'Table',
+
+        }),
+        input.config.field('task', {
+            label: 'Task Name',
+            description: 'String',
+            parentTable: 'table',
+        }),
+        input.config.field('startDate',{
+            label: 'Start Date',
+            description: 'Date',
+            parentTable: 'table',
+        }),
+        input.config.field('endDate',{
+            label: 'Deadline',
+            description: 'Date',
+            parentTable: 'table',
+        }),
+        input.config.field('duration',{
+            label: 'Duration',
+            description: 'Integer - Displays a tasks\'\s duration in number of weeks.',
+            parentTable: 'table',
+        }),
+        input.config.field('antecedent',{
+            label: 'Preceding Step',
+            description: 'Linked Record - Shows the step(s) that must be complete for a given task to begin.',
+            parentTable: 'table',
+        }),
+        input.config.field('numAntecedents',{
+            label: 'Preceding Step Counter',
+            description: "Counter - Shows the number of entries in the 'Preceding Step' field.",
+            parentTable: 'table',
+        })
+
+    ]
+});
+
+let tableStr = config.table;
+let taskField = config.task;
+let startField = config.startDate;
+let endField = config.endDate;
+let durationField = config.duration;
+let numAntecedentsField = config.numAntecedents;
+let antecedentField = config.antecedent;
+
+let table = base.getTable(tableStr.name);
+
+
+let query = await table.selectRecordsAsync({sorts: [{field: antecedentField.id}]});
+
+//PART 2: The functions
+
+//This function converts a string to a date object.
+function convertToDate(str){
+
+    let array = str.split('/');
+    let month = Number(array[0])-1;
+    let day = Number(array[1]);
+    let year = Number(array[2]);
+
+    let newDate = new Date(year, month, day);
+
+    return newDate;
+
+}
+
+//Bumps a day forward to avoid weekends.
+function bumpForwardIfWeekend(weekday, day){
+
+    if(weekday === 0){
+        day = day + 1;
+    }
+    if(weekday === 6){
+        day = day + 2;
+    }
+    
+    return day;
+}
+
+//Bumps a date forward one day plus more if it is a weekend day. 
+function bumpForward(date){
+
+        let day = date.getDate();
+        let weekday = date.getDay();
+        let month = date.getMonth();
+        let year = date.getFullYear();
+
+        day = day + 1;
+        weekday = weekday + 1;
+
+        day = bumpForwardIfWeekend(weekday, day);
+
+        let newDate = new Date(year, month, day);
+
+        return newDate;
+}
+
+//This function will generate an array containing the start date, end date, and all intermediary dates for
+// a given task. This will be used to check for holidays.
+function getDateStrArray(date, duration){
+
+    let endDate = getEndDate(date, duration, 0);
+
+    let day = date.getDate();
+    let month = date.getMonth();
+    let year = date.getFullYear();
+
+    let newDate = date;
+    let dateStrArray = [];
+    let dateStr = String(date);
+    dateStrArray.push(dateStr);
+    
+    while(newDate < endDate){
+        day = day + 1;
+        newDate = new Date(year, month, day);
+        let newDateStr = String(newDate);
+        dateStrArray.push(newDateStr);
+    }
+
+    return dateStrArray;
+}
+
+//This function takes an array of holiday dates and counts how many of them show up on a second array,
+//in this case our array of dates connected to a given task.  
+function countHolidaysinRange(holidays, dateArray){
+
+    let numHolidays = 0;
+
+    for(let i = 0; i<holidays.length; i++){
+        let match = dateArray.includes(holidays[i]);
+        if(match){
+            numHolidays = numHolidays + 1;
+        }
+    }
+    return numHolidays;
+}
+
+//Given a start date, returns a task's end date based on the duration.
+function getEndDate(date, duration, numHolidays){
+
+    let endDay = date.getDate();
+    let endMonth = date.getMonth();
+    let endYear = date.getFullYear();
+
+    if(!numHolidays){
+        let numHolidays = 0;
+    }
+
+    endDay = endDay + (duration * 7) + numHolidays;
+
+    let endDate = new Date(endYear, endMonth, endDay);
+    let weekday = endDate.getDay();
+
+    endDay = bumpForwardIfWeekend(weekday, endDay);
+    endDate = new Date(endYear, endMonth, endDay);
+
+    return endDate;
+}
+
+//Compares two dates and returns the later one. 
+function returnLaterDate(date1, date2){
+
+    if(date1>date2){
+        return date1;
+    }else if(date2>date1){
+        return date2;
+    }
+}
+
+//This function finds the child tasks for a given parent task and completes them with the appropriate start/end dates. 
+async function filterAndFill(parentName, parentEndDate){
+
+    let children = query.records.filter(record => record.getCellValueAsString(antecedentField.name) === parentName)
+
+    if(children.length > 0){
+
+        for(let i = 0; i < children.length; i++){
+            
+            let child = children[i];          
+            let duration = child.getCellValue(durationField.name);
+            let childtask = child.getCellValueAsString(taskField.name);
+
+            let newStart = bumpForward(parentEndDate);
+            let dateArray = getDateStrArray(newStart, duration);
+            let numHolidays = countHolidaysinRange(holidays, dateArray);
+
+            let newEndDate = getEndDate(newStart, duration, numHolidays);
+
+            await table.updateRecordAsync(child, {[startField.id]: newStart, [endField.id]: newEndDate});
+            await filterAndFill(childtask, newEndDate);
+        }
+    }
+
+    let childrenWithMore = query.records.filter(record => record.getCellValue(numAntecedentsField.name) > 1);
+
+    if(childrenWithMore.length > 0){
+        await filterAndFillMulti(childrenWithMore, parentName, parentEndDate);
+    }
+}
+
+//If a given task has multiple antecedents, this function will add the appropriate start/end dates.
+async function filterAndFillMulti(childrenWithMore, parentName, parentEndDate){
+
+    for(let i = 0; i < childrenWithMore.length; i++){
+            
+            let child = childrenWithMore[i];
+                        
+            let duration = child.getCellValue(durationField.name);
+            let childtask = child.getCellValueAsString(taskField.name);
+            let antecedent = child.getCellValueAsString(antecedentField.name);
+
+            if(antecedent.includes(parentName)){
+
+                let iteration = completeMulti.filter(element => element.childtask === childtask);
+
+                if(iteration.length === 0){
+
+                    let newStart = bumpForward(parentEndDate);
+                    let dateArray = getDateStrArray(newStart, duration);
+                    let numHolidays = countHolidaysinRange(holidays, dateArray);
+
+                    let newEndDate = getEndDate(newStart, duration, numHolidays); 
+
+                    await table.updateRecordAsync(child, {[startField.id]: newStart, [endField.id]: newEndDate});
+
+                    let obj = {childtask, newStart};
+                    completeMulti.push(obj);
+
+                    await filterAndFill(childtask, newEndDate);
+                }else{
+
+                    let currentStart = iteration[0].newStart;
+                    let newStart = returnLaterDate(currentStart, parentEndDate);
+
+                    if(newStart === currentStart){
+
+                    }else{
+
+                        let newStart = bumpForward(parentEndDate);
+                        let dateArray = getDateStrArray(newStart, duration);
+                        let numHolidays = countHolidaysinRange(holidays, dateArray);
+
+                        let newEndDate = getEndDate(newStart, duration, numHolidays);
+
+                        await table.updateRecordAsync(child, {[startField.id]: newStart, [endField.id]: newEndDate});
+                        await filterAndFill(childtask, newEndDate);
+
+                        let index = completeMulti.findIndex(element => element.childtask === childtask);
+                        let obj = {childtask, newStart};
+
+                        completeMulti.splice(index,1,obj);
+
+                    }
+
+                }
+            }
+        }
+}
+
+//PART 3: Main Program
+
+//This array will store any record with multiple antecedents after the initial pass over. 
+let completeMulti = [];
+
+//Get the launch date for the project.
+let userDateStr = await input.textAsync("Enter project launch date (mm/dd/yyyy):");
+let launchDate = convertToDate(userDateStr);
+
+let holidayStr;
+let holidays = [];
+
+//Get any holidays.
+
+while(holidayStr!="done"){
+
+    holidayStr = await input.textAsync("Enter a holiday date that should extend deadlines (mm/dd/yyyy) or Enter 'done' to exit:");
+    let holidayDate = convertToDate(holidayStr);
+    let holiday = String(holidayDate);
+
+    if(holidayStr!="done"){
+        holidays.push(holiday);
+    }
+}
+
+output.markdown("Thank you! Your sequence is being generated....");
+
+for(let record of query.records){
+
+    let antecedentsNum = record.getCellValue(numAntecedentsField.name);
+    let task = record.getCellValueAsString(taskField.name);
+    let duration = record.getCellValue(durationField.name);
+
+    if(antecedentsNum === 0){
+        
+        let dateArray = getDateStrArray(launchDate, duration);
+
+        let numHolidays = countHolidaysinRange(holidays, dateArray);
+
+        let endDate = getEndDate(launchDate, duration, numHolidays);
+
+        await table.updateRecordAsync(record,{[startField.id]: launchDate, [endField.id]: endDate});
+        await filterAndFill(task, endDate);
+
+    }
+}
+
+output.text("Sequence complete. Good bye!");
